@@ -190,10 +190,12 @@ func (b *Beacon) waitForSymmetricPeers(ctx context.Context) error {
 // tips into the local engine. Errors are non-fatal since the subscription
 // will be retried during waitForMembershipConverged.
 func (b *Beacon) primeSubscription() {
-	_, _, _, err := b.engine.GetSnapshot(MembershipKey)
+	ctx := b.engine.NewContext()
+	_, _, err := ctx.GetSnapshot(MembershipKey)
 	if err != nil {
 		slog.Debug("beacon: prime subscription incomplete (will retry)", "error", err)
 	}
+	ctx.Flush()
 }
 
 // registerSelf writes this node's INSERT_OP + type tag + initial TTL.
@@ -227,8 +229,13 @@ func (b *Beacon) refreshLoop() {
 	// pinned to the DNS-synthetic view until the first tick fires,
 	// which at the 10s default is long enough for an early client
 	// query to route against an incomplete peer set.
-	if snapshot, _, _, err := b.engine.GetSnapshot(MembershipKey); err == nil {
-		b.syncMembership(snapshot)
+	{
+		ctx := b.engine.NewContext()
+		snapshot, _, err := ctx.GetSnapshot(MembershipKey)
+		if err == nil {
+			b.syncMembership(snapshot)
+		}
+		ctx.Flush()
 	}
 
 	ticker := time.NewTicker(b.cfg.heartbeatInterval())
@@ -239,12 +246,17 @@ func (b *Beacon) refreshLoop() {
 		case <-b.ctx.Done():
 			return
 		case <-ticker.C:
-			snapshot, _, _, err := b.engine.GetSnapshot(MembershipKey)
+			ctx := b.engine.NewContext()
+			snapshot, _, err := ctx.GetSnapshot(MembershipKey)
 			if err != nil {
-				slog.Debug("beacon: failed to read membership before TTL refresh", "error", err)
+				panic("beacon: membership unreadable: " + err.Error())
+			}
+			if snapshot == nil || snapshot.NetAdds == nil || snapshot.NetAdds[string(nodeIDBytes(uint64(b.cfg.NodeID)))] == nil {
+				if err := b.registerSelf(); err != nil {
+					panic("beacon: failed to re-register after membership loss: " + err.Error())
+				}
 				continue
 			}
-			ctx := b.engine.NewContext()
 			if err := ctx.Emit(buildMemberTTLRefresh(uint64(b.cfg.NodeID), b.cfg.failureTimeout())); err != nil {
 				slog.Warn("beacon: failed to emit TTL refresh", "error", err)
 				continue

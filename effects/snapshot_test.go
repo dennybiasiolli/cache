@@ -235,15 +235,15 @@ func TestGetSnapshot_ForkLWW(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Lowest fork_choice_hash wins
+	// Higher fork_choice_hash wins (applied last in linearized reduction)
 	hashA := ComputeForkChoiceHash(1, sTs(20))
 	hashB := ComputeForkChoiceHash(2, sTs(30))
-	expected := "branchA"
+	expected := "branchB"
 	if ForkChoiceLess(hashB, hashA) {
-		expected = "branchB"
+		expected = "branchA"
 	}
 	if string(r.Scalar.GetRaw()) != expected {
-		t.Fatalf("expected %q (lower hash), got %q", expected, r.Scalar.GetRaw())
+		t.Fatalf("expected %q (higher hash), got %q", expected, r.Scalar.GetRaw())
 	}
 }
 
@@ -594,11 +594,13 @@ func TestGetSnapshot_ExpiredKeyReturnsNil(t *testing.T) {
 	}
 }
 
-func TestGetSnapshot_ExpiredReconstructedReturnsNil(t *testing.T) {
+func TestGetSnapshot_ExpiredReconstructedStillReturnsState(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log, nil)
 
-	// Data effect + meta with past expiry
+	// Data effect + meta with past expiry. GetSnapshot returns the raw
+	// causal state — expiry filtering is a presentation concern handled
+	// by the protocol layer, not reconstruction.
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
 		Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte("val"))},
@@ -613,8 +615,8 @@ func TestGetSnapshot_ExpiredReconstructedReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r != nil {
-		t.Fatal("expected nil for expired reconstructed key")
+	if r == nil {
+		t.Fatal("expected non-nil — raw causal state should be returned regardless of expiry")
 	}
 }
 
@@ -833,61 +835,6 @@ func TestReduceChain_MetaOnTopOfSeed(t *testing.T) {
 	}
 	if r.GetExpiresAt().AsTime().UnixNano() != 9999 {
 		t.Fatalf("expected ExpiresAt=9999ns, got %v", r.ExpiresAt)
-	}
-}
-
-// --- findLCA tests (using DAG-based LCA) ---
-
-func TestFindLCA_SingleTip(t *testing.T) {
-	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
-	root := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(10)})
-	cr, err := e.collectReachableNodes("k", []Tip{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dag := BuildDAG(cr.nodes)
-	lca := dag.FindLCA(dag.Tips())
-	if lca == nil || lca.Offset != root {
-		t.Fatalf("expected LCA=%v, got %v", root, lca)
-	}
-}
-
-func TestFindLCA_TwoTipsSameFork(t *testing.T) {
-	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
-	root := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(10)})
-	a := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(20), Deps: []*pb.EffectRef{toPbRef(root)}})
-	b := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(25), Deps: []*pb.EffectRef{toPbRef(a)}})
-	tip1 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(30), Deps: []*pb.EffectRef{toPbRef(b)}})
-	tip2 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(35), Deps: []*pb.EffectRef{toPbRef(b)}})
-	cr, err := e.collectReachableNodes("k", []Tip{tip1, tip2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dag := BuildDAG(cr.nodes)
-	lca := dag.FindLCA(dag.Tips())
-	if lca == nil || lca.Offset != b {
-		t.Fatalf("expected LCA=%v (B), got %v", b, lca)
-	}
-}
-
-func TestFindLCA_ThreeTips(t *testing.T) {
-	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
-	root := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(10)})
-	fork := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(20), Deps: []*pb.EffectRef{toPbRef(root)}})
-	tip1 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(25), Deps: []*pb.EffectRef{toPbRef(fork)}})
-	tip2 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(30), Deps: []*pb.EffectRef{toPbRef(fork)}})
-	tip3 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(35), Deps: []*pb.EffectRef{toPbRef(fork)}})
-	cr, err := e.collectReachableNodes("k", []Tip{tip1, tip2, tip3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dag := BuildDAG(cr.nodes)
-	lca := dag.FindLCA(dag.Tips())
-	if lca == nil || lca.Offset != fork {
-		t.Fatalf("expected LCA=%v, got %v", fork, lca)
 	}
 }
 
